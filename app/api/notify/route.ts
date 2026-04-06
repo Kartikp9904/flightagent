@@ -49,8 +49,9 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ error: "Invalid notification type." }, { status: 400 });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to send notification.";
     console.error("Notification API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to send notification." }, { status: 500 });
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

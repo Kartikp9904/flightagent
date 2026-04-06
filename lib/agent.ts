@@ -6,7 +6,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 // Using gemini-2.5-flash as requested and verified by our diagnostics.
 const model = genAI.getGenerativeModel({
   model: "gemini-2.5-flash",
-} as any);
+});
 
 export interface Flight {
   id: string;
@@ -107,17 +107,18 @@ export async function parseScrapedFlights(
     if (!jsonMatch) throw new Error("Agent failed to parse the live scraping results.");
 
     return JSON.parse(jsonMatch[0]);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Gemini Data Parsing Error:", error);
+    const errorMessage = error instanceof Error ? error.message : "";
 
     // Auto-fallback suggestion for invalid model version or quota
-    if (error.message?.includes("429") || error.message?.includes("quota")) {
+    if (errorMessage.includes("429") || errorMessage.includes("quota")) {
       throw new Error("CAUSE: QUOTA");
     }
-    if (error.message?.includes("404") || error.message?.includes("not found")) {
+    if (errorMessage.includes("404") || errorMessage.includes("not found")) {
       throw new Error("CAUSE: MODEL");
     }
 
-    throw new Error(error.message || "CAUSE: UNKNOWN");
+    throw new Error(errorMessage || "CAUSE: UNKNOWN");
   }
 }

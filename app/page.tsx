@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Search, Plane, Calendar, Users, Briefcase, Mail, MessageSquare, AlertCircle, Sparkles, MapPin } from "lucide-react";
+import { Search, Plane, Calendar, Users, Briefcase, Mail, AlertCircle, Sparkles, MapPin } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Flight, SearchCriteria } from "@/lib/agent";
 
@@ -55,9 +55,7 @@ export default function Home() {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          
-          let parsedData: any = null;
+          let parsedData: unknown = null;
           try {
             parsedData = JSON.parse(line.replace("data: ", ""));
           } catch (err) {
@@ -65,18 +63,21 @@ export default function Home() {
             continue;
           }
           
-          if (parsedData.type === "log") {
-            setLogs(prev => [...prev, parsedData.message]);
-          } else if (parsedData.type === "result") {
-            setResults(parsedData);
-          } else if (parsedData.type === "error") {
-            // Re-throw outside that can be caught by the main catch block
-            throw new Error(parsedData.message);
+          if (typeof parsedData === "object" && parsedData !== null) {
+            const data = parsedData as { type: string, message?: string };
+            if (data.type === "log") {
+              setLogs(prev => [...prev, data.message || ""]);
+            } else if (data.type === "result") {
+              setResults(parsedData as { flights: Flight[], agentInsight: string });
+            } else if (data.type === "error") {
+              // Re-throw outside that can be caught by the main catch block
+              throw new Error(data.message || "An unknown error occurred during the search.");
+            }
           }
         }
       }
-    } catch (err: any) {
-      const msg = err.message || "";
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
       let errorData = { 
         show: true, 
         title: "Search Encoutered an Issue", 
@@ -137,8 +138,9 @@ export default function Home() {
       if (data.error) throw new Error(data.error);
       setNotificationStatus({ success: true, message: `Notification sent successfully via ${type}!` });
       setTimeout(() => setNotificationStatus(null), 5000);
-    } catch (err: any) {
-      setNotificationStatus({ success: false, message: err.message || "Failed to send notification." });
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to send notification.";
+      setNotificationStatus({ success: false, message: errorMessage });
     }
   };
 
@@ -367,7 +369,7 @@ export default function Home() {
                 <div style={{ display: 'flex', borderTop: '1px solid var(--glass-border)', paddingTop: '1.5rem', gap: '2rem', alignItems: 'center' }}>
                   <div style={{ flex: 1 }}>
                     <p style={{ fontSize: '0.875rem', color: '#cbd5e1', fontStyle: 'italic' }}>
-                      " {flight.agentReasoning} "
+                      &quot; {flight.agentReasoning} &quot;
                     </p>
                   </div>
                   <div style={{ display: 'flex', gap: '1rem' }}>

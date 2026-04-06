@@ -65,11 +65,12 @@ export async function scrapeFlights(
     onStep(`Live data successfully captured. Now parsing with AI...`);
     
     return resultsText;
-  } catch (error: any) {
-    if (error.message?.includes("Timeout") || error.message?.includes("timeout")) {
+  } catch (error: unknown) {
+    if (error instanceof Error && (error.message?.includes("Timeout") || error.message?.includes("timeout"))) {
       throw new Error("CAUSE: TIMEOUT");
     }
-    onStep(`Error during scraping: ${error.message}`);
+    const errorMessage = error instanceof Error ? error.message : "Unknown scraping error";
+    onStep(`Error during scraping: ${errorMessage}`);
     throw error;
   } finally {
     await browser.close();

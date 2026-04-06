@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { scrapeFlights } from "@/lib/scraper";
 import { parseScrapedFlights } from "@/lib/agent";
 
@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      function send(data: any) {
+      function send(data: unknown) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       }
 
@@ -33,9 +33,10 @@ export async function POST(req: NextRequest) {
         send({ type: "result", ...result });
         
         controller.close();
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : "An unexpected error occurred during the live search.";
         console.error("Streaming Search Error:", error);
-        send({ type: "error", message: error.message || "An unexpected error occurred during the live search." });
+        send({ type: "error", message: errorMessage });
         controller.close();
       }
     },
