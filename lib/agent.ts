@@ -1,12 +1,10 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { buildBookingLink } from "./bookingLinks";
 
 console.log("GEMINI_API_KEY Present:", !!process.env.GEMINI_API_KEY);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
-// Using gemini-2.5-flash as requested and verified by our diagnostics.
-const model = genAI.getGenerativeModel({
-  model: "gemini-2.5-flash",
-});
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 export interface Flight {
   id: string;
@@ -37,88 +35,153 @@ export interface SearchCriteria {
   maxStops?: number;
 }
 
-export async function parseScrapedFlights(
-  scrapedData: string,
+/**
+ * Strip fields that are heavy on tokens and that Gemini should never touch.
+ * bookingLink is ALWAYS built by buildBookingLink — never from AI output.
+ */
+function toPromptFlights(flights: Flight[]) {
+  return flights.map(({ bookingLink: _bl, baggageInfo: _bi, stopLocations: _sl, ...rest }) => rest);
+}
+
+export async function analyzeFlights(
+  flights: Flight[],
   criteria: SearchCriteria
-): Promise<{ flights: Flight[], agentInsight: string }> {
-  // CRITICAL: Strict sorting priority requested by the user.
-  // 1. Cheapest 0-stop flights
-  // 2. Cheapest 1-stop flights
-  // 3. Overall cheapest
+): Promise<{ flights: Flight[]; agentInsight: string }> {
+  // Sort and slice: only send top 25 to Gemini to keep tokens and analysis time low.
+  const flightsForPrompt = toPromptFlights(
+    flights.sort((a, b) => a.price - b.price).slice(0, 25)
+  );
+
   const prompt = `
-    You are a professional flight data extraction expert. 
-    TASK: Analyze the RAW WEB TEXT provided below and extract the best current flight options.
-    
-    Travel Details:
-    - Origin: ${criteria.origin}
-    - Destination: ${criteria.destination}
-    - Date: ${criteria.departureDate}
+You are a professional travel advisor.
+TASK: Analyze the flight results below and return your top recommendations.
 
-    RAW WEB TEXT (Scraped row-by-row):
-    """
-    ${scrapedData.substring(0, 30000)}
-    """
+Travel Details:
+- Origin: ${criteria.origin}
+- Destination: ${criteria.destination}
+- Date: ${criteria.departureDate}
+${criteria.returnDate ? `- Return: ${criteria.returnDate}` : ""}
 
-    STRICT ROW-BY-ROW RULES (MANDATORY):
-    1. The raw text is delineated by '====FLIGHT_ROW===='.
-    2. PRICE INTEGRITY: Only extract a price if it is found WITHIN the specific '====FLIGHT_ROW====' block for that flight.
-    3. NEVER use a price from the top of the search page or a 'Cheapest from' header. 
-    4. CURRENCY: Detect and keep the exact currency symbol (e.g., ₹, $, €, £).
-    
-    SORTING RULES:
-    1. PRIORITY 1: Find and list all CHEAPEST 0-STOP (Direct) flights first.
-    2. PRIORITY 2: Then list the CHEAPEST 1-STOP flights.
-    3. PRIORITY 3: Overall cheapest available.
-    
-    DATA EXTRACTION:
-    - Extract ALL valid flight options found in the text segments.
-    
-    RETURN ONLY A VALID JSON OBJECT:
+FLIGHT DATA (JSON):
+"""
+${JSON.stringify(flightsForPrompt)}
+"""
+
+STRICT ANALYSIS RULES:
+1. SORTING:
+   - Find the CHEAPEST 0-STOP flight first.
+   - Then the CHEAPEST 1-STOP flight.
+   - Then the OVERALL BEST VALUE flight (price + duration + convenience).
+2. Limit output to the best 10 flights.
+3. Be specific in agentReasoning — reference actual prices and times.
+
+CRITICAL FORMATTING RULES:
+- Return ONLY a raw JSON object.
+- Do NOT use markdown, backticks, or code fences of any kind.
+- Do NOT include any text before or after the JSON.
+
+JSON shape:
+{
+  "flights": [
     {
-      "flights": [
-        {
-          "id": "string",
-          "airline": "string",
-          "flightNumber": "string",
-          "departureTime": "ISO String",
-          "arrivalTime": "ISO String",
-          "duration": "string",
-          "stops": number,
-          "stopLocations": ["string"],
-          "price": number,
-          "currency": "USD",
-          "bookingLink": "URL to the search page or airline",
-          "baggageInfo": "string",
-          "isCheapest": boolean,
-          "isBestValue": boolean,
-          "agentReasoning": "Specifically state why this fulfills the '0-stop first' or 'Cheapest 1-stop' priority rule."
-        }
-      ],
-      "agentInsight": "Expert summary of the live flight market for this route based on the scraped data."
+      "id": "string",
+      "airline": "string",
+      "flightNumber": "string",
+      "departureTime": "ISO string",
+      "arrivalTime": "ISO string",
+      "duration": "string",
+      "stops": number,
+      "price": number,
+      "currency": "string",
+      "isCheapest": boolean,
+      "isBestValue": boolean,
+      "agentReasoning": "string"
     }
-  `;
+  ],
+  "agentInsight": "string"
+}
+`;
 
   try {
     const result = await model.generateContent(prompt);
     const text = result.response.text();
-    console.log("Gemini Live Data Parsing Output:", text);
+    console.log("Gemini raw output:", text);
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("Agent failed to parse the live scraping results.");
+    // Strip any accidental markdown fences
+    const cleaned = text
+      .replace(/```json\s*/gi, "")
+      .replace(/```\s*/gi, "")
+      .trim();
 
-    return JSON.parse(jsonMatch[0]);
+    // Brace-counting parser — immune to trailing text after closing }
+    let depth = 0;
+    let start = -1;
+    let end = -1;
+
+    for (let i = 0; i < cleaned.length; i++) {
+      if (cleaned[i] === "{") {
+        if (start === -1) start = i;
+        depth++;
+      } else if (cleaned[i] === "}") {
+        depth--;
+        if (depth === 0 && start !== -1) { end = i; break; }
+      }
+    }
+
+    if (start === -1 || end === -1) {
+      throw new Error("Agent failed to return a valid JSON object.");
+    }
+
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+
+    // Validate shape
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("Gemini returned an unexpected non-object response.");
+    }
+    if (!Array.isArray(parsed.flights)) {
+      console.warn("Gemini missing 'flights' array — defaulting to empty.");
+      parsed.flights = [];
+    }
+    if (typeof parsed.agentInsight !== "string") {
+      parsed.agentInsight = "No insight available.";
+    }
+
+    // Re-attach fields Gemini never saw — bookingLink is ALWAYS from buildBookingLink
+    const originalMap = new Map(flights.map(f => [f.id, f]));
+
+    parsed.flights = (parsed.flights as Flight[]).map((f: Flight) => {
+      const original = originalMap.get(f.id);
+
+      // Always rebuild the booking link from scratch to guarantee it's correct
+      const bookingLink = buildBookingLink({
+        airline: f.airline || original?.airline || "",
+        origin: criteria.origin,
+        destination: criteria.destination,
+        date: criteria.departureDate,
+        returnDate: criteria.returnDate,
+        passengers: criteria.passengers,
+        cabinClass: criteria.cabinClass,
+      });
+
+      return {
+        ...f,
+        bookingLink,
+        baggageInfo: original?.baggageInfo ?? "Check airline for details",
+        stopLocations: original?.stopLocations ?? [],
+      };
+    });
+
+    return parsed as { flights: Flight[]; agentInsight: string };
   } catch (error: unknown) {
-    console.error("Gemini Data Parsing Error:", error);
-    const errorMessage = error instanceof Error ? error.message : "";
+    console.error("Gemini Error:", error);
+    const msg = error instanceof Error ? error.message : String(error);
 
-    // Auto-fallback suggestion for invalid model version or quota
-    if (errorMessage.includes("429") || errorMessage.includes("quota")) {
-      throw new Error("CAUSE: QUOTA");
-    }
-    if (errorMessage.includes("404") || errorMessage.includes("not found")) {
-      throw new Error("CAUSE: MODEL");
-    }
+    if (msg.includes("429") || msg.includes("quota")) throw new Error("CAUSE: QUOTA");
+    if (msg.includes("404") || msg.includes("not found")) throw new Error("CAUSE: MODEL");
+    if (msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED") || msg.includes("timeout"))
+      throw new Error("CAUSE: NETWORK");
+    if (msg.includes("JSON") || msg.includes("valid JSON")) throw new Error("CAUSE: PARSE");
 
-    throw new Error(errorMessage || "CAUSE: UNKNOWN");
+    throw new Error(`CAUSE: UNKNOWN — ${msg}`);
   }
 }
